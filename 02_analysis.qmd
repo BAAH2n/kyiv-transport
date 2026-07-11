@@ -1,0 +1,114 @@
+---
+title: "Крок 2. EDA, статистичні тести та візуалізації"
+subtitle: "Kyiv Public Transport — KSE Probability & Statistics"
+lang: uk
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+<!-- Скелет згенеровано з допомогою Claude (Anthropic). Тести пишемо самі:
+     схема кожної гіпотези = діагностика → вибір тесту → p-value → висновок словами.
+     Використовуємо ЛИШЕ методи курсу (лекції 6–10). -->
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(here)
+
+d <- read_csv(here("data", "processed", "analysis_table.csv"))
+glimpse(d)
+```
+
+## EDA
+
+Мета — обґрунтувати вибір тестів у Methodology (скошеність → рангові тести).
+
+```{r}
+#| label: eda
+# TODO:
+# 1) summary(d)
+# 2) гістограма sched_headway_min (загалом і по time_slot)
+# 3) boxplot по типах транспорту
+# 4) 5 речень висновків: чи скошений розподіл? викиди? розміри груп?
+```
+
+## H1. Пік vs непік (Лекції 6, 7, 9)
+
+```{r}
+#| label: h1
+# 1) Діагностика по групах: shapiro.test(), qqnorm() + qqline()
+# 2) Нормально  -> t.test(sched_headway_min ~ peak)
+#    Скошено    -> wilcox.test(sched_headway_min ~ peak)   # Mann–Whitney
+# 3) Висновок словами + чому обрано саме цей тест
+# TODO
+```
+
+## H2. Слоти та типи транспорту (Лекція 9)
+
+```{r}
+#| label: h2
+# kruskal.test(sched_headway_min ~ time_slot); те саме по transport_type
+# якщо значущо -> pairwise.wilcox.test(..., p.adjust.method = "holm")
+# TODO
+```
+
+## H3. Тип транспорту × категорія частоти (Лекція 8)
+
+```{r}
+#| label: h3
+# на пікових слотах:
+# freq_cat <- cut(sched_headway_min, c(0, 10, 20, Inf),
+#                 labels = c("частий", "середній", "рідкісний"))
+# table(transport_type, freq_cat) |> chisq.test()
+# перевірити $expected >= 5; інакше об'єднати категорії
+# TODO
+```
+
+## H4. Провізна здатність vs населення районів (Лекція 8)
+
+```{r}
+#| label: h4
+# потрібно: spatial join зупинок до районів (sf), агрегація capacity по районах
+# chisq.test(x = capacity_по_районах, p = частка_населення)
+# $stdres -> які райони недо-/переобслужені
+# TODO
+```
+
+## H5. Чи є headway експоненційним? (Лекція 7)
+
+```{r}
+#| label: h5
+# один тип транспорту, один слот:
+# lambda <- 1 / mean(h)
+# ks.test(h, "pexp", rate = lambda)
+# графік: ECDF проти теоретичної CDF
+# у Discussion: lambda оцінена з тих самих даних -> p-value наближене
+# TODO
+```
+
+## Бонус. Bootstrap-CI різниці середніх (Лекція 10)
+
+```{r}
+#| label: bootstrap
+# 5000 ресемплів різниці mean(пік) - mean(непік) -> percentile CI
+# порівняти висновок із H1
+# TODO
+```
+
+## Фінальні візуалізації (2 штуки, ідеальні)
+
+```{r}
+#| label: final-viz
+#| fig-width: 9
+#| fig-height: 6
+# 1) choropleth: capacity на 1000 мешканців по районах (geom_sf + scale_fill_viridis_c)
+# 2) boxplot/violin: headway по слотах × тип транспорту (facet_wrap)
+# Вимоги: theme_minimal(), українські підписи осей з одиницями,
+#         заголовок-висновок, джерело даних у caption
+# TODO
+```

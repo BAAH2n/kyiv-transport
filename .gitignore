@@ -1,0 +1,23 @@
+# --- дані ---
+# знімки realtime: тисячі файлів кожні 2 хв — у git їм не місце
+# (фінальний realtime_positions.csv у data/processed комітимо)
+data/raw/rt/*.pb
+
+# --- R / RStudio ---
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# --- Quarto / рендер ---
+/.quarto/
+*_files/
+*.html
+!slides/*.html
+
+# --- Python ---
+.venv/
+__pycache__/
+
+# --- macOS ---
+.DS_Store

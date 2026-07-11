@@ -1,0 +1,76 @@
+---
+title: "Крок 3 (бонус). План vs факт: пілот на добових GPS-даних"
+subtitle: "Kyiv Public Transport — KSE Probability & Statistics"
+lang: uk
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+<!-- Скелет згенеровано з допомогою Claude (Anthropic).
+     БОНУС-частина: якщо не встигаємо — дропаємо без жалю, ядро проєкту не залежить. -->
+
+Передумови: збирач `R/collect_realtime.R` пропрацював ≥ 24 год, і виконано
+`python scripts/parse_realtime.py`, який склав усі .pb-знімки в
+`data/processed/realtime_positions.csv`.
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(lubridate)
+library(here)
+
+rt <- read_csv(here("data", "processed", "realtime_positions.csv")) |>
+  mutate(dt = as_datetime(timestamp, tz = "Europe/Kyiv"))
+
+n_distinct(rt$vehicle_id); n_distinct(rt$route_id); range(rt$dt)
+```
+
+## Вибір пілотних маршрутів
+
+Беремо 2–3 маршрути з чіткою кінцевою та частим рухом (щоб за добу
+набралося досить прибуттів).
+
+```{r}
+#| label: pick-routes
+rt |> count(route_id, sort = TRUE) |> head(10)
+# TODO: обрати 2-3 route_id; знайти координати їх кінцевих у gtfs$stops
+```
+
+## Фактичні headway на кінцевій
+
+Момент «прибуття на кінцеву» = перший запис ТЗ у радіусі ~150 м від кінцевої.
+
+```{r}
+#| label: actual-headways
+# TODO:
+# 1) відфільтрувати rt по обраному route_id
+# 2) відстань до кінцевої: sf::st_distance() або наближено за формулою
+#    haversine; залишити точки < 150 м
+# 3) для кожного vehicle_id узяти перший момент появи в радіусі -> "прибуття"
+# 4) відсортувати прибуття, diff() -> фактичні headway
+```
+
+## Порівняння з плановими
+
+::: {.callout-important}
+Збір ішов у **вихідні** — порівнюємо з розкладом вихідного дня
+(service_id, де saturday = 1 / sunday = 1), а не буднього!
+:::
+
+```{r}
+#| label: compare
+# TODO:
+# 1) планові headway цих маршрутів на вихідний service_id (код із 01_data_preparation.qmd)
+# 2) діагностика нормальності -> t.test() або wilcox.test(): факт vs план
+# 3) один графік: розподіл фактичних headway + вертикальна лінія планового середнього
+```
+
+## Висновок для звіту
+
+Чесно: це пілот на **одному вихідному дні**, GPS має шум, покриття фіду
+неповне. 2–3 речення в Discussion.

@@ -1,0 +1,192 @@
+---
+title: "Крок 1. Дані: завантаження та побудова аналітичного датасету"
+subtitle: "Kyiv Public Transport — KSE Probability & Statistics"
+lang: uk
+format:
+  html:
+    toc: true
+    code-fold: false
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+<!-- Код-скелет згенеровано з допомогою Claude (Anthropic), допрацьовано командою.
+     Джерело даних: Портал даних Києва (Open Data Licence). -->
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(tidytransit)
+library(lubridate)
+library(jsonlite)
+library(here)
+library(janitor)
+```
+
+## 1. Завантаження сирих даних
+
+Дані вже завантажені 11.07.2026 і лежать у `data/raw`. Чанк нижче вимкнено
+(`eval: false`) — увімкнути лише якщо треба перекачати свіжу версію.
+
+```{r}
+#| label: download
+#| eval: false
+urls <- c(
+  gtfs_kyiv.zip =
+    "https://data.kyivcity.gov.ua/dataset/rozklad-rukhu-miskoho-elektrychnoho-ta-avtomobilnoho-transportu-dep-transport/resource/58f0c3d0-9409-4de9-92c8-de4afa035efd/data/download",
+  vehicles_kpt.json =
+    "https://data.kyivcity.gov.ua/dataset/vidomosti-pro-transportni-zasoby-iaki-obsluhovuiut-pasazhyrski-avtobusni-troleibusni-t-dep-transport/resource/efad1f37-779d-4d8e-9d1e-3a6b345775d6/data/download",
+  vehicles_marshrutky.csv =
+    "https://data.kyivcity.gov.ua/dataset/vidomosti-pro-transportni-zasoby-iaki-obsluhovuiut-pasazhyrski-avtobusni-troleibusni-t-dep-transport/resource/a8a2b2c6-d709-45fa-ba5c-a42db698e20f/data/download",
+  stops_kpt.json =
+    "https://data.kyivcity.gov.ua/dataset/dani-pro-mistse-rozmishchennia-zupynok-miskoho-elektrychnoho-ta-avtomobilnoho-transpor-dep-transport/resource/269ffb2e-dac0-4978-9552-10d29a30724b/data/download"
+)
+dir.create(here("data", "raw"), recursive = TRUE, showWarnings = FALSE)
+for (nm in names(urls))
+  download.file(urls[[nm]], here("data", "raw", nm), mode = "wb", quiet = TRUE)
+writeLines(paste("Downloaded:", Sys.time()), here("data", "raw", "download_log.txt"))
+```
+
+## 2. Читання GTFS і вибір розкладу буднього дня
+
+```{r}
+#| label: read-gtfs
+gtfs <- read_gtfs(here("data", "raw", "gtfs_kyiv.zip"))
+names(gtfs)
+```
+
+У `calendar` окремі service_id для буднів і вихідних. Аналізуємо **будній день**:
+
+```{r}
+#| label: services
+count(gtfs$calendar, monday, saturday, sunday)
+
+weekday_services <- gtfs$calendar |>
+  filter(monday == 1) |>
+  pull(service_id)
+length(weekday_services)
+```
+
+## 3. Планові інтервали (headway)
+
+Headway рахуємо на **першій контрольній точці** рейсу (`stop_sequence == 1` —
+перевірено у файлі; опис порталу помилково каже «з 10»): це моменти
+відправлення з кінцевої, різниці сусідніх відправлень = інтервали.
+
+::: {.callout-warning}
+Часи в GTFS бувають більші за 24:00 (рейси після півночі) — перевіряємо NA
+після конвертації.
+:::
+
+```{r}
+#| label: headways
+dep <- gtfs$stop_times |>
+  filter(stop_sequence == 1) |>
+  inner_join(gtfs$trips, by = "trip_id") |>
+  filter(service_id %in% weekday_services) |>
+  mutate(dep_sec = as.numeric(hms(departure_time)))
+
+sum(is.na(dep$dep_sec))   # очікуємо 0 або одиниці
+
+headways <- dep |>
+  arrange(route_id, direction_id, dep_sec) |>
+  group_by(route_id, direction_id) |>
+  mutate(headway_min = (dep_sec - lag(dep_sec)) / 60) |>
+  ungroup() |>
+  filter(!is.na(headway_min), headway_min > 0, headway_min < 120) |>
+  mutate(
+    hour = dep_sec %/% 3600,
+    time_slot = case_when(
+      hour %in% 7:9   ~ "ранковий пік",
+      hour %in% 10:16 ~ "день",
+      hour %in% 17:19 ~ "вечірній пік",
+      TRUE            ~ "вечір/ніч"
+    )
+  ) |>
+  group_by(route_id, direction_id, time_slot) |>
+  summarise(
+    sched_headway_min = mean(headway_min),
+    sd_headway_min    = sd(headway_min),
+    n_departures      = n(),
+    .groups = "drop"
+  )
+
+nrow(headways)
+```
+
+**Санітарна перевірка (зробити руками!):** `route_desc` у `routes.txt` містить
+планову частоту словами («Частота відправлення трамваїв 4-9 хв»). Звірити
+3–4 маршрути з нашими числами:
+
+```{r}
+#| label: sanity
+# TODO: обрати 3-4 route_id, порівняти sched_headway_min з route_desc
+gtfs$routes |> select(route_id, route_short_name, route_desc) |> slice(1:3)
+```
+
+## 4. Атрибути маршрутів
+
+### 4a. Тип транспорту
+
+Опис порталу (1/2/3) суперечить файлу — дивимось на реальні значення:
+
+```{r}
+#| label: route-types
+count(gtfs$routes, route_type)
+# TODO: після перегляду виводу замапити коди у назви, напр.:
+# route_types <- gtfs$routes |>
+#   mutate(transport_type = case_when(route_type == 0 ~ "трамвай", ...))
+```
+
+### 4b. Кількість контрольних точок
+
+```{r}
+#| label: n-stops
+n_stops <- gtfs$stop_times |>
+  group_by(trip_id) |>
+  summarise(n = max(stop_sequence)) |>
+  inner_join(gtfs$trips, by = "trip_id") |>
+  group_by(route_id) |>
+  summarise(n_ctrl_points = max(n))
+```
+
+### 4c. Довжина маршруту
+
+```{r}
+#| label: route-length
+# TODO: shapes_as_sf(gtfs$shapes) → sf::st_length() →
+#       звести до route_id через trips (route_id ↔ shape_id), взяти max по маршруту
+```
+
+### 4d. Кількість ТЗ і провізна здатність
+
+```{r}
+#| label: vehicles
+veh <- fromJSON(here("data", "raw", "vehicles_kpt.json")) |> as_tibble()
+glimpse(veh)
+
+# УВАГА: routeId буває "14,47" (кілька маршрутів через кому)
+# TODO: veh |> separate_rows(routeId, sep = ",") |>
+#   ... з'єднати з route_short_name із gtfs$routes ...
+#   group_by(route) |> summarise(n_vehicles = n(), total_capacity = sum(capacity))
+```
+
+## 5. Фінальна аналітична таблиця
+
+```{r}
+#| label: final-table
+# TODO: join: headways + типи (4a) + n_stops (4b) + довжина (4c) + vehicles (4d)
+# Перевірити критерії курсу: >= 100 рядків, >= 4 корисні пояснювальні змінні,
+# мікс категоріальних і кількісних. Скільки маршрутів випало через NA — задокументувати.
+# write_csv(final, here("data", "processed", "analysis_table.csv"))
+```
+
+## Нотатки для звіту (Data Preparation)
+
+- GTFS покриває лише КП «Київпастранс»; маршрутки — без розкладу.
+- `stop_times` — лише контрольні точки (не всі зупинки).
+- Відомі баги фіду з пропозицій громадян на порталі (дзеркальні напрямки —
+  виправлено; частина тимчасових маршрутів відсутня) → до Discussion.
+- Скільки рядків відфільтровано і чому (headway > 120 хв, NA тощо) — порахувати.
