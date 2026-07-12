@@ -1,0 +1,106 @@
+---
+title: "02_analysis_Danilova"
+format: html
+editor: visual
+echo: false
+---
+
+
+## 1. Let's take a little look at our data
+
+  > Before working on our hypothesis we should look at how our data is distributed. 
+It also may help to interpret our test results later and see if they stick to each other. 
+
+```{r}
+#| output: false 
+library(tidyverse)
+library(here)
+library(ggplot2)
+
+d <- readr::read_csv("/Users/Asus/Desktop/Transp_proj/kyiv-transport/data/processed/analysis_table.csv") |>
+  filter(n_departures >= 5)   # -- here we read the data and filter roots with less then 5 departures, in order to have less variance of our data and see the picture more clear. 
+```
+
+
+```{r}
+
+# -- General distribution of the intervals 
+ggplot(d, aes(sched_headway_min)) +
+  geom_histogram(bins = 40) +
+  labs(title = "General distribution of the intervals", x = "Interval, min", y = "Num") +
+  theme_minimal()
+
+# -- Interval by time
+ggplot(d, aes(time_slot, sched_headway_min)) +
+  geom_boxplot() +
+  labs(x = "Time slot", y = "Interval, min") +
+  theme_minimal()
+
+#Interval by transport type
+ggplot(d, aes(transport_type, sched_headway_min, color = transport_type))+
+  geom_boxplot()+
+  labs(x = "Transport type", y = "Interval, min")+
+  theme_minimal()
+
+# -- Summary
+d |>
+  group_by(peak) |>
+  summarise(n = n(), median = median(sched_headway_min), mean = mean(sched_headway_min), sd = sd(sched_headway_min))
+```
+  Well both median and mean waiting time periods are quiet big. Also we see that standard deviation for non-peak time is high. Personally I would not trust the transport if the median time I should wait is 23 minutes at the peak. 
+  
+## 1 Hypothesis: Peak VS Non-peak. How the time between the headways change through the daytime? 
+  > for that we will run Shapiro, do QQ plots and Wilcox test
+  
+```{r}
+# Shapiro for every group
+d |> group_by(peak) |>
+  summarise(shapiro_p = shapiro.test(sched_headway_min)$p.value)
+
+# QQ-plot
+par(mfrow = c(1, 2))
+qqnorm(d$sched_headway_min[d$peak == TRUE],  main = "Peak");   qqline(d$sched_headway_min[d$peak == TRUE])
+qqnorm(d$sched_headway_min[d$peak == FALSE], main = "No-peak"); qqline(d$sched_headway_min[d$peak == FALSE])
+par(mfrow = c(1, 1))
+```
+ **Note:** *We can see that our data is not normal, so t-test cannot be used here.* 
+```{r}
+wilcox.test(sched_headway_min ~ peak, data = d)
+```
+With p-value = 4.207e-14 we can clearly reject H0 and say that there is a difference between peak and non-peak time, so let's dive deeper and investigate the particular differences. 
+
+## 2 Hypothesis: Which pairs of time slots and transport types differ and which do not?
+```{r}
+# -- H2: is there any difference between time slots during the day?
+kruskal.test(sched_headway_min ~ factor(time_slot), data = d)
+
+# --  H2: is there any difference between the transport types?
+kruskal.test(sched_headway_min ~ factor(transport_type), data = d)
+```
+```{r}
+#--Which pairs are different
+pairwise.wilcox.test(d$sched_headway_min, d$time_slot,     p.adjust.method = "holm")
+pairwise.wilcox.test(d$sched_headway_min, d$transport_type, p.adjust.method = "holm")
+```
+ Here we can see that there are no difference between evening and evening peak and morning and evening peak. But we have high difference between day and late evening, day and evening peak and between day and morning peak. We also have very small difference between late evening and morning peak, which us the most confusing result we obtained. 
+
+ Moreover there is more difference between tram and trolleybus then between bus and either of other transport types. 
+
+ Used holm p-value adjustment method, so that in our pairwise comparison we won't obtain high false-positive results. 
+ 
+```{r}
+ d |> 
+  group_by(time_slot) |> 
+  summarize(median = median(sched_headway_min), mean = mean(sched_headway_min), sd = sd(sched_headway_min))
+```
+With this summary table we can see the difference between the day and every other time-slot. Midday has the highest standard deviation - 14.6, median - 29.5 and mean - 32.09 values, while other time-slots have more or less the same values. So the real gap is not between peek and non-peak but between the day and everything else. 
+
+Moreover higher standard deviation at the daytime tells us about unstable schedule at this period of time compared to the rest of the day. 
+
+```{r}
+d |> group_by(transport_type) |>
+  summarise(median = median(sched_headway_min)) |>
+  arrange(median)
+```
+ Here is a just-to-compare tibble to see that tram is the best-planned transport ever due to our investigation. 
+ Nevertheless we should mention there are way more bus departures then other types of transports (590 buses while 125 trams and 321 trolley buses ) and that particular type of transport needs more attention from the city transport administration. 
