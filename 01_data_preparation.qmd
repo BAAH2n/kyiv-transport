@@ -27,12 +27,20 @@ library(janitor)
 
 ## 1. Завантаження сирих даних
 
-Дані вже завантажені 11.07.2026 і лежать у `data/raw`. Чанк нижче вимкнено
-(`eval: false`) — увімкнути лише якщо треба перекачати свіжу версію.
+::: {.callout-important}
+**НЕ ЗАПУСКАТИ ЦЕЙ ЧАНК.** Дані вже завантажені 11.07.2026 і лежать у
+`data/raw` (закомічені в git). Переходь одразу до секції 2.
+
+Якщо колись справді треба перекачати: портал редіректить на http-адресу,
+і стандартний завантажувач RStudio падає — тому тут `curl::curl_download()`,
+а не `download.file()`. Альтернатива: відкрити лінк у браузері й покласти
+файл у `data/raw` руками.
+:::
 
 ```{r}
 #| label: download
 #| eval: false
+library(curl)   # install.packages("curl") якщо нема
 urls <- c(
   gtfs_kyiv.zip =
     "https://data.kyivcity.gov.ua/dataset/rozklad-rukhu-miskoho-elektrychnoho-ta-avtomobilnoho-transportu-dep-transport/resource/58f0c3d0-9409-4de9-92c8-de4afa035efd/data/download",
@@ -45,7 +53,7 @@ urls <- c(
 )
 dir.create(here("data", "raw"), recursive = TRUE, showWarnings = FALSE)
 for (nm in names(urls))
-  download.file(urls[[nm]], here("data", "raw", nm), mode = "wb", quiet = TRUE)
+  curl::curl_download(urls[[nm]], here("data", "raw", nm))
 writeLines(paste("Downloaded:", Sys.time()), here("data", "raw", "download_log.txt"))
 ```
 
@@ -120,10 +128,22 @@ nrow(headways)
 планову частоту словами («Частота відправлення трамваїв 4-9 хв»). Звірити
 3–4 маршрути з нашими числами:
 
+Перевірено 12.07.2026 на 5 маршрутах усіх трьох типів (див. `report/notes.md`):
+трамвай 1 (4–9 хв ✔), трамвай 11 (16–27 ✔), трамвай 12 (11–17 ⚠ частково —
+напрямок 1 дає ~22–24, ймовірно неповнота рейсів у фіді → Discussion),
+тролейбус 16 (16–20 ✔), автобус 49 (30 ✔).
+
 ```{r}
 #| label: sanity
-# TODO: обрати 3-4 route_id, порівняти sched_headway_min з route_desc
-gtfs$routes |> select(route_id, route_short_name, route_desc) |> slice(1:3)
+validation_routes <- c("1_1", "1_36", "1_37", "2_12", "3_100")
+
+gtfs$routes |>
+  filter(route_id %in% validation_routes) |>
+  select(route_id, route_short_name, route_desc)
+
+headways |>
+  filter(route_id %in% validation_routes) |>
+  arrange(route_id, direction_id, time_slot)
 ```
 
 ## 4. Атрибути маршрутів
@@ -132,12 +152,22 @@ gtfs$routes |> select(route_id, route_short_name, route_desc) |> slice(1:3)
 
 Опис порталу (1/2/3) суперечить файлу — дивимось на реальні значення:
 
+Перевірено 12.07.2026: у файлі стандартні GTFS-коди — 0 = трамвай (17),
+3 = автобус (99), 11 = тролейбус (44). Опис порталу (1/2/3) — неправильний.
+
 ```{r}
 #| label: route-types
 count(gtfs$routes, route_type)
-# TODO: після перегляду виводу замапити коди у назви, напр.:
-# route_types <- gtfs$routes |>
-#   mutate(transport_type = case_when(route_type == 0 ~ "трамвай", ...))
+
+route_types <- gtfs$routes |>
+  mutate(transport_type = case_when(
+    route_type == 0  ~ "трамвай",
+    route_type == 3  ~ "автобус",
+    route_type == 11 ~ "тролейбус"
+  )) |>
+  select(route_id, route_short_name, transport_type)
+
+count(route_types, transport_type)   # перевірка: без NA
 ```
 
 ### 4b. Кількість контрольних точок
@@ -162,26 +192,73 @@ n_stops <- gtfs$stop_times |>
 
 ### 4d. Кількість ТЗ і провізна здатність
 
+Особливості даних (перевірено на файлі 12.07.2026): `routeId` — це *номер*
+маршруту (= `route_short_name`), буває списком через кому ("14,47");
+номер не унікальний між типами (трамвай 14 ≠ тролейбус 14), тому джойн
+по парі (номер + тип). Тип ТЗ — з `bodyType` (7 значень, мапляться за
+префіксом). Беремо лише статус «Використовується» (1036 з 1291 ТЗ);
+`capacity` заповнена для всіх.
+
 ```{r}
 #| label: vehicles
 veh <- fromJSON(here("data", "raw", "vehicles_kpt.json")) |> as_tibble()
-glimpse(veh)
+count(veh, bodyType, status) |> arrange(desc(n))
 
-# УВАГА: routeId буває "14,47" (кілька маршрутів через кому)
-# TODO: veh |> separate_rows(routeId, sep = ",") |>
-#   ... з'єднати з route_short_name із gtfs$routes ...
-#   group_by(route) |> summarise(n_vehicles = n(), total_capacity = sum(capacity))
+veh_long <- veh |>
+  filter(status == "Використовується") |>
+  separate_rows(routeId, sep = ",") |>
+  mutate(
+    routeId = str_trim(routeId),
+    transport_type = case_when(
+      str_detect(bodyType, "^Трамвай")   ~ "трамвай",
+      str_detect(bodyType, "^Тролейбус") ~ "тролейбус",
+      str_detect(bodyType, "^Автобус")   ~ "автобус"
+    )
+  )
+
+veh_by_route <- veh_long |>
+  group_by(routeId, transport_type) |>
+  summarise(
+    n_vehicles     = n_distinct(uid),
+    total_capacity = sum(capacity, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+route_types_veh <- route_types |>
+  left_join(veh_by_route,
+            by = c("route_short_name" = "routeId", "transport_type"))
+
+# Перевірка покриття: очікуємо ~98% (без ТЗ лише тимчасові маршрути 1т/3т/4т)
+mean(!is.na(route_types_veh$n_vehicles))
+route_types_veh |> filter(is.na(n_vehicles))
 ```
+
+Методологічна нотатка: ТЗ, закріплений за кількома маршрутами, врахований
+у кожному з них — `total_capacity` це «доступна маршруту» місткість, а не
+сума unique-парку міста.
 
 ## 5. Фінальна аналітична таблиця
 
 ```{r}
 #| label: final-table
-# TODO: join: headways + типи (4a) + n_stops (4b) + довжина (4c) + vehicles (4d)
-# Перевірити критерії курсу: >= 100 рядків, >= 4 корисні пояснювальні змінні,
-# мікс категоріальних і кількісних. Скільки маршрутів випало через NA — задокументувати.
-# write_csv(final, here("data", "processed", "analysis_table.csv"))
+final <- headways |>
+  left_join(route_types_veh, by = "route_id") |>
+  left_join(n_stops, by = "route_id") |>
+  mutate(peak = time_slot %in% c("ранковий пік", "вечірній пік"))
+# TODO (неділя): + route_length_km з чанка route-length
+
+nrow(final)                      # критерій курсу: >= 100 (очікуємо ~1200)
+count(final, transport_type)     # без NA
+count(final, time_slot, peak)
+mean(is.na(final$n_vehicles))    # частка рядків без даних про ТЗ — у звіт
+
+dir.create(here("data", "processed"), showWarnings = FALSE)
+write_csv(final, here("data", "processed", "analysis_table.csv"))
 ```
+
+Критерії курсу: рядків ≥ 100 ✓; пояснювальні змінні — transport_type,
+time_slot/peak (категоріальні), n_vehicles, total_capacity, n_ctrl_points
+(кількісні) ✓; мікс типів ✓; залежні — sched_headway_min, sd_headway_min.
 
 ## Нотатки для звіту (Data Preparation)
 
