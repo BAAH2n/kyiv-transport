@@ -71,12 +71,34 @@ glimpse(d)
 
 ## H4. Провізна здатність vs населення районів (Лекція 8)
 
+Вхідні дані готуються в `01_data_preparation.qmd` (секція 6 →
+`data/processed/capacity_by_district.csv`): район кожної зупинки береться
+з коду КАТОТТГ у `stops_kpt.json` (полігони не потрібні), capacity маршруту
+ділиться між районами пропорційно частці його контрольних точок. Тут —
+лише тест.
+
 ```{r}
 #| label: h4
-# потрібно: spatial join зупинок до районів (sf), агрегація capacity по районах
-# chisq.test(x = capacity_по_районах, p = частка_населення)
-# $stdres -> які райони недо-/переобслужені
-# TODO
+cap_d <- read_csv(here("data", "processed", "capacity_by_district.csv"))
+
+# Населення районів: створити руками data/raw/population_districts.csv
+# (колонки: district, population; назви районів ТОЧНО як у cap_d)
+# з офіційної статистики (Держстат / сайт КМДА). ДЖЕРЕЛО процитувати у звіті!
+pop <- read_csv(here("data", "raw", "population_districts.csv"))
+
+d4 <- inner_join(cap_d, pop, by = "district")
+stopifnot(nrow(d4) == 10)   # якщо менше — не збіглися назви районів
+
+# H0: capacity розподілена пропорційно населенню (Лекція 8, GoF)
+test4 <- chisq.test(x = d4$capacity, p = d4$population / sum(d4$population))
+test4
+
+# стандартизовані залишки: «+» переобслужені, «−» недообслужені райони
+d4 |> mutate(stdres = round(test4$stdres, 1)) |> arrange(stdres)
+
+# TODO (інтерпретація словами): очікуємо, що Дарницький — найбільший «−»
+# (7.1% capacity при найбільшому населенні). Ці ж числа → фінальна діаграма:
+# capacity на 1000 мешканців по районах (стовпчикова, відсортована).
 ```
 
 ## H5. Чи є headway експоненційним? (Лекція 7)

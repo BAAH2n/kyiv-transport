@@ -93,11 +93,12 @@ peak_data$freq_cat <- cut(
 tab3 <- table(peak_data$transport_type, peak_data$freq_cat)
 print(tab3)
 
-# check the expected frequencies to see if there are some < 5
-print(chi3$expected)
-
 # we have one category of trams < 5, we use the simulation of p-value, we randomly shuffle the data 10000 times to calculate the p-value more accurately
 chi3 <- chisq.test(tab3, simulate.p.value = TRUE, B = 10000)
+
+# check the expected frequencies to see if there are some < 5
+# (fix: chi3 має бути створений ДО звернення до chi3$expected, інакше рендер падає)
+print(chi3$expected)
 print(chi3)
 
 #The high chi-square value of 92.014 shows us that the difference in the intervals for the three modes of transportation across categories is very significant and differs greatly from proportionally equal values; for if Kyiv had planned the intervals for buses, trams, and trolleybuses to be strictly the same, the value would have been close to 0.
