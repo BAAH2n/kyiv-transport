@@ -1,0 +1,173 @@
+---
+title: "Крок 2. EDA, статистичні тести та візуалізації"
+subtitle: "Kyiv Public Transport — KSE Probability & Statistics"
+lang: uk
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+<!-- Скелет згенеровано з допомогою Claude (Anthropic). Тести пишемо самі:
+     схема кожної гіпотези = діагностика → вибір тесту → p-value → висновок словами.
+     Використовуємо ЛИШЕ методи курсу (лекції 6–10). -->
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(here)
+
+d <- read_csv(here("data", "processed", "analysis_table.csv"))
+glimpse(d)
+```
+
+## EDA
+
+Мета — обґрунтувати вибір тестів у Methodology (скошеність → рангові тести).
+
+```{r}
+#| label: eda
+#| # 1) Загальний огляд
+summary(d)
+
+# 2) Гістограма розподілу інтервалів
+ggplot(d, aes(x = sched_headway_min)) +
+  geom_histogram(fill = "steelblue", color = "white", bins = 30) +
+  facet_wrap(~time_slot) +
+  theme_minimal() +
+  labs(title = "Розподіл планових інтервалів по слотах", x = "Інтервал (хв)", y = "Частота")
+
+# 3) Boxplot по типах транспорту
+ggplot(d, aes(x = transport_type, y = sched_headway_min, fill = transport_type)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Інтервали руху за типами транспорту", x = "Тип транспорту", y = "Інтервал (хв)")
+# TODO:
+# 1) summary(d)
+# 2) гістограма sched_headway_min (загалом і по time_slot)
+# 3) boxplot по типах транспорту
+# 4) 5 речень висновків: чи скошений розподіл? викиди? розміри груп?
+```
+
+## H1. Пік vs непік (Лекції 6, 7, 9)
+
+```{r}
+#| label: h1
+# 1) Діагностика по групах: shapiro.test(), qqnorm() + qqline()
+# 2) Нормально  -> t.test(sched_headway_min ~ peak)
+#    Скошено    -> wilcox.test(sched_headway_min ~ peak)   # Mann–Whitney
+# 3) Висновок словами + чому обрано саме цей тест
+# TODO
+```
+
+## H2. Слоти та типи транспорту (Лекція 9)
+
+```{r}
+#| label: h2
+# kruskal.test(sched_headway_min ~ time_slot); те саме по transport_type
+# якщо значущо -> pairwise.wilcox.test(..., p.adjust.method = "holm")
+# TODO
+```
+
+## H3. Тип транспорту × категорія частоти (Лекція 8)
+
+```{r}
+#| label: h3
+
+#The route frequency category (frequency ≤10 min / average 10–20 / rare >20 at peak) does not depend on the type of transport (or on the carrier: municipal vs private). chi-square test of independence on the conjugation table.
+
+# filter to take into account only peak intervals:
+peak_data <- d %>% filter(peak == TRUE)
+
+# here we divide categories
+peak_data$freq_cat <- cut(
+  peak_data$sched_headway_min, 
+  breaks = c(0, 10, 20, Inf), 
+  labels = c("частий", "середній", "рідкісний")
+)
+
+# table
+tab3 <- table(peak_data$transport_type, peak_data$freq_cat)
+print(tab3)
+
+# check the expected frequencies to see if there are some < 5
+print(chi3$expected)
+
+# we have one category of trams < 5, we use the simulation of p-value, we randomly shuffle the data 10000 times to calculate the p-value more accurately
+chi3 <- chisq.test(tab3, simulate.p.value = TRUE, B = 10000)
+print(chi3)
+
+#The high chi-square value of 92.014 shows us that the difference in the intervals for the three modes of transportation across categories is very significant and differs greatly from proportionally equal values; for if Kyiv had planned the intervals for buses, trams, and trolleybuses to be strictly the same, the value would have been close to 0.
+#The expected frequency for trams in the “frequent intervals” category turned out to be less than the threshold (4.006 < 5). Therefore, the standard approximation to the chi-square distribution could give us a misleading value. For this reason, we used a p-value simulation. In this way, the computer independently generates a distribution from 10000 random combinations of the available data, and the degrees of freedom in this case are meaningless - therefore, the results show NA.
+#The p-value of 0.000099 is very small and shows us that the chance of such a transportation distribution occurring by chance is very low.
+#Therefore, the test results completely refute the hypothesis that the city plans its transit schedule during peak hours to be uniform. Trams clearly have the largest number of routes that run frequently, while the city uses buses more as a secondary mode of transportation that runs less frequently.
+
+#An analysis of this data confirmed that trams have the highest scheduled arrival frequency during peak hours; however, since Kyiv’s tram network is smaller than its bus and trolleybus networks—and tram routes are generally shorter and fewer in number—this result does not allow us to draw broad conclusions about the superiority of one mode of transportation over another. However, we can draw a specific conclusion that provides a clear practical recommendation for passengers: If there is a choice between a bus stop and a tram stop in the same direction, it is always better to choose the tram. After all, trams have the largest number of routes that run more frequently, so passengers spend less time waiting at the stop.
+```
+
+## H4. Провізна здатність vs населення районів (Лекція 8)
+
+```{r}
+#| label: h4
+# потрібно: spatial join зупинок до районів (sf), агрегація capacity по районах
+# chisq.test(x = capacity_по_районах, p = частка_населення)
+# $stdres -> які райони недо-/переобслужені
+# TODO
+```
+
+## H5. Чи є headway експоненційним? (Лекція 7)
+
+```{r}
+#| label: h5
+# The scheduled intervals for public transportation during rush hour follow an exponential distribution. The arrival of public transportation follows a completely random Poisson process, with no fixed schedule.
+for (type in c("автобус", "трамвай", "тролейбус")) {
+  
+  # 1. витягуємо інтервали строго для поточного типу транспорту в пік
+  intervals <- d %>% 
+    filter(transport_type == type, peak == TRUE) %>% 
+    pull(sched_headway_min) %>% 
+    na.omit()
+  
+  # 2. параметр лямбда
+  lambda_est <- 1 / mean(intervals)
+  
+  # 3. тест Колмогорова-Смирнова
+  #To verify this, we use the Kolmogorov–Smirnov test. Since our intervals are a continuous numerical variable, this test is designed to check whether such data conforms to a specific theoretical distribution—in our case, the exponential distribution. We do not use the Chi-square GoF test because we are working with continuous data and do not want to artificially divide it into groups.
+  ks_res <- ks.test(intervals, "pexp", rate = lambda_est)
+  
+  # 4. вивід результатів
+  cat(paste0("=== Перевірка для типу: ", toupper(type), " ===\n"))
+  cat(sprintf("Кількість спостережень у пік: %d\n", length(intervals)))
+  cat(sprintf("Параметр інтенсивності (lambda): %.4f\n", lambda_est))
+  cat(sprintf("Статистика тесту D: %.4f\n", ks_res$statistic))
+  cat(sprintf("p-value: %.4g\n", ks_res$p.value))
+  cat("--------------------------------------------\n\n")
+}
+#The D-statistic ranges from 0.2337 for trams to 0.3266 for trolleybuses; buses have a value close to that of trolleybuses, specifically 0.3157. This value indicates the discrepancy between our actual arrival schedules and the ideal random curve. If the vehicles arrived at stops in a completely random and independent manner, the values would be close to 0; therefore, we can conclude that our values show a fairly significant deviation. The p-value for all modes of transportation is close to 0, except for trams, which have the highest value of 0.001068—which is still below the standard threshold of 0.05. This shows that the probability that such a distribution of intervals occurred by chance is practically zero. 
+#Thus, the test results completely refute the hypothesis that scheduled headways are exponentially distributed and that public transportation in Kyiv arrives randomly.Buses and trolleybuses show the greatest deviation from randomness, indicating that fixed intervals are maintained more successfully in urban transit planning. Since we used data from the transit plan rather than actual arrival times, we cannot definitively state whether public transit schedules can be trusted in reality, but we can offer a practical recommendation: it is better to rely on bus and trolleybus schedules, as their intervals are less random and, according to the plan, wait times are more predictable.
+```
+
+## Бонус. Bootstrap-CI різниці середніх (Лекція 10)
+
+```{r}
+#| label: bootstrap
+# 5000 ресемплів різниці mean(пік) - mean(непік) -> percentile CI
+# порівняти висновок із H1
+# TODO
+```
+
+## Фінальні візуалізації (2 штуки, ідеальні)
+
+```{r}
+#| label: final-viz
+#| fig-width: 9
+#| fig-height: 6
+# 1) choropleth: capacity на 1000 мешканців по районах (geom_sf + scale_fill_viridis_c)
+# 2) boxplot/violin: headway по слотах × тип транспорту (facet_wrap)
+# Вимоги: theme_minimal(), українські підписи осей з одиницями,
+#         заголовок-висновок, джерело даних у caption
+# TODO
+```
