@@ -19,9 +19,6 @@ format:
   pdf:
     toc: true
     number-sections: true
-    # xelatex + шрифти з кирилицею: інакше українські підписи зникають
-    # у код-чанках і таблицях (стандартний шрифт pdflatex без кирилиці).
-    # macOS: Arial + Menlo. Windows: заміни monofont на "Consolas".
     pdf-engine: xelatex
     mainfont: "Arial"
     monofont: "Menlo"
@@ -32,13 +29,13 @@ execute:
   warning: false
   message: false
   echo: true
+# кирилиця на ggplot-фігурах у PDF: рендер фігур через ragg
+# (потрібно: install.packages("ragg"))
+knitr:
+  opts_chunk:
+    dev: "ragg_png"
+    dpi: 300
 ---
-
-<!-- ВІДНОВЛЕНО з report.pdf 13.07.2026 + виправлення за код-рев'ю.
-     Наратив авторів збережено; виправлено: accepted->rejected (H1/H2/H4),
-     числа приведені до рендерених таблиць (H3, H5), codebook, фільтр
-     n_departures, підпис Fig. 2, References, Appendix + AI statement.
-     ПЕРЕД ЗДАЧЕЮ: кожен автор перечитує свою секцію! -->
 
 **Dataset:** Портал даних Києва, КП «Київпастранс». 1230 route × direction ×
 time-slot rows constructed; interval-level analyses (EDA, H1–H2) use the
@@ -88,7 +85,6 @@ full table.
 | `total_capacity` | Quantitative | Total passenger count | Combined vehicle passenger capacity. |
 | `n_ctrl_points` | Quantitative | Count | Number of schedule control points on a route. |
 | `sched_headway_min` | Quantitative | Minutes | Average scheduled interval between runs. |
-| `sd_headway_min` | Quantitative | Minutes | Within-slot variability of the interval. |
 | `n_departures` | Quantitative | Count | Number of departures in the slot. |
 
 ## Research Question and Hypotheses
@@ -225,8 +221,9 @@ headways <- dep |>
 ```
 
 **Sanity check:** verified 2026-07-12 on 5 routes (all 3 modes): tram 1
-(4–9m ✓), tram 11 (16–27m ✓), tram 12 (11–17m — partial: direction 1 gives
-~22–24m, likely incomplete feed), trolleybus 16 (16–20m ✓), bus 49 (30m ✓).
+(4–9m, match), tram 11 (16–27m, match), tram 12 (11–17m — partial: direction
+1 gives ~22–24m, likely incomplete feed), trolleybus 16 (16–20m, match),
+bus 49 (30m, match).
 
 ### The route attributes
 
@@ -393,6 +390,15 @@ For this research we used the following statistical methods:
    CDF. *Justification:* the data is continuous, so no artificial binning is
    needed. Because the rate parameter is estimated directly from the data,
    the p-value acts as an approximation.
+6. **Spearman's Rank Correlation (H4 robustness: metro compensation).**
+   Measures monotonic association between two numeric variables by
+   correlating their ranks instead of raw values — the same rank-based logic
+   as in Mann–Whitney and Kruskal–Wallis. *Justification:* with only 10
+   districts and extreme residual values (from −102 to +155), a rank-based
+   measure is robust to outliers; it is used descriptively (no formal test),
+   to check whether districts underserved by surface transit systematically
+   receive more metro stations per capita. This method goes slightly beyond
+   the course toolbox, which the project guidelines explicitly allow.
 
 # Results
 
@@ -423,10 +429,6 @@ rank-based test instead of the t-test.
 
 ```{r}
 #| label: h1-test
-# One-sided test, because H1 is directional ("smaller during rush").
-# Group order in the formula is FALSE (off-peak) then TRUE (peak),
-# so alternative = "greater" states: off-peak intervals are stochastically
-# GREATER than peak intervals, i.e. peak intervals are smaller.
 h1_test <- wilcox.test(sched_headway_min ~ peak, data = d,
                        alternative = "greater")
 h1_test
@@ -504,8 +506,6 @@ min, rare: >20 min, during rush) does not depend on the transport type
 
 ```{r}
 #| label: h3
-# H3 та H5 пораховані на повній таблиці (без фільтра >= 5 відправлень),
-# щоб зберегти всі запланові слоти; висновки за фільтром не змінюються
 peak_data <- d_full |> filter(peak) |>
   mutate(freq_cat = cut(sched_headway_min, breaks = c(0, 10, 20, Inf),
                         labels = c("частий", "середній", "рідкісний")))
@@ -627,7 +627,6 @@ constitute a Poisson process).**
 
 ```{r}
 #| label: h5
-# як і H3 — на повній таблиці (див. примітку в Data Preparation)
 for (type in c("автобус", "трамвай", "тролейбус")) {
   intervals <- d_full |>
     filter(transport_type == type, peak == TRUE) |>
@@ -840,8 +839,6 @@ assumptions.
 # Appendix
 
 ## Team Contributions
-
-<!-- ПІДТВЕРДИТИ КОМАНДОЮ перед здачею: -->
 
 | Team member | Contribution |
 |---|---|
