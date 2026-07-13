@@ -1,5 +1,5 @@
 ---
-title: "Крок 3 (бонус). План vs факт: пілот на добових GPS-даних"
+title: "Крок 3 (бонус). План vs факт: пілот на realtime GPS-даних"
 subtitle: "Kyiv Public Transport — KSE Probability & Statistics"
 lang: uk
 format:
@@ -11,66 +11,167 @@ execute:
   message: false
 ---
 
-<!-- Скелет згенеровано з допомогою Claude (Anthropic).
-     БОНУС-частина: якщо не встигаємо — дропаємо без жалю, ядро проєкту не залежить. -->
+<!-- Код згенеровано з допомогою Claude (Anthropic), допрацьовано командою.
+     Передумови: збирач R/collect_realtime.R відпрацював (362 знімки,
+     нд 09:58 - пн 09:17), python scripts/parse_realtime.py склав знімки
+     у data/processed/realtime_positions.csv. -->
 
-Передумови: збирач `R/collect_realtime.R` пропрацював ≥ 24 год, і виконано
-`python scripts/parse_realtime.py`, який склав усі .pb-знімки в
-`data/processed/realtime_positions.csv`.
+**Ідея пілоту:** ядро проєкту аналізує *плановий* розклад. Тут ми на трьох
+маршрутах (тих самих, на яких валідували методику: трамвай 1, тролейбус 16,
+автобус 49) перевіряємо, наскільки фактичний рух у **понеділковий ранковий
+пік** відповідає плану. Фактичне прибуття на кінцеву відновлюємо з
+GPS-знімків (крок полінгу 2 хв → похибка ±2 хв на подію).
 
 ```{r}
 #| label: setup
 library(tidyverse)
 library(lubridate)
 library(here)
+library(geosphere)   # install.packages("geosphere") якщо нема
 
 rt <- read_csv(here("data", "processed", "realtime_positions.csv")) |>
   mutate(dt = as_datetime(timestamp, tz = "Europe/Kyiv"))
 
-n_distinct(rt$vehicle_id); n_distinct(rt$route_id); range(rt$dt)
+range(rt$dt)                 # очікуємо: нд ~09:58 → пн ~09:17
+n_distinct(rt$vehicle_id)    # ~800 машин
+n_distinct(rt$route_id)      # ~163 маршрути
 ```
 
-## Вибір пілотних маршрутів
+## 1. Пілотні маршрути, кінцеві та планові інтервали
 
-Беремо 2–3 маршрути з чіткою кінцевою та частим рухом (щоб за добу
-набралося досить прибуттів).
+Кінцева кожного напрямку = перша контрольна точка рейсу (stop_sequence == 1),
+виводимо її прямо з GTFS-файлів. Плановий інтервал ранкового піку беремо з
+нашої ж аналітичної таблиці.
 
 ```{r}
-#| label: pick-routes
-rt |> count(route_id, sort = TRUE) |> head(10)
-# TODO: обрати 2-3 route_id; знайти координати їх кінцевих у gtfs$stops
+#| label: terminals
+pilots <- c("1_1", "2_12", "3_100")   # трамвай 1, тролейбус 16, автобус 49
+
+trips      <- read_csv(here("data", "raw", "gtfs", "trips.txt"))
+stop_times <- read_csv(here("data", "raw", "gtfs", "stop_times.txt"))
+stops      <- read_csv(here("data", "raw", "gtfs", "stops.txt"))
+
+# У маршрутів є варіантні рейси (виїзди з депо, скорочені рейси) — кожен
+# дає свою "першу зупинку". Основна кінцева напрямку = та, з якої стартує
+# НАЙБІЛЬШЕ рейсів (модальна перша зупинка).
+terminals <- stop_times |>
+  filter(stop_sequence == 1) |>
+  inner_join(trips, by = "trip_id") |>
+  filter(route_id %in% pilots) |>
+  count(route_id, direction_id, stop_id) |>
+  group_by(route_id, direction_id) |>
+  slice_max(n, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  left_join(stops, by = "stop_id")
+terminals   # має бути рівно 6 рядків: 3 маршрути × 2 напрямки
+
+plan <- read_csv(here("data", "processed", "analysis_table.csv")) |>
+  filter(route_id %in% pilots, time_slot == "ранковий пік") |>
+  select(route_id, direction_id, plan_headway = sched_headway_min)
+plan
 ```
 
-## Фактичні headway на кінцевій
+## 2. Детекція прибуттів на кінцеву
 
-Момент «прибуття на кінцеву» = перший запис ТЗ у радіусі ~150 м від кінцевої.
+Машина «прибула», коли перейшла зі стану «зовні» у стан «всередині»
+радіуса 200 м. Стан скидається на «зовні» лише після відходу > 450 м —
+інакше машина, що стоїть на кінцевій, генерувала б фальшиву подію кожні
+2 хв. Важливо: це саме *становий автомат*, а не просте порівняння з
+попередньою точкою — при повільному під'їзді (~10 км/год ≈ 330 м за пінг)
+машина часто «приземляється» в кільце 200–450 м, і правило
+`lag(dist) > 450` пропускало б такі прибуття (гістерезис).
+
+```{r}
+#| label: arrivals-fn
+arrivals_at <- function(rt_route, term_lat, term_lon) {
+  rt_route |>
+    arrange(vehicle_id, timestamp) |>
+    mutate(dist = distHaversine(cbind(lon, lat), c(term_lon, term_lat))) |>
+    group_by(vehicle_id) |>
+    mutate(
+      inside = purrr::accumulate(
+        dist, .init = FALSE,
+        \(state, d) if (d < 200) TRUE else if (d > 450) FALSE else state
+      )[-1],
+      arrival = inside & !lag(inside, default = FALSE)
+    ) |>
+    ungroup() |>
+    filter(arrival) |>
+    arrange(dt) |>
+    pull(dt)
+}
+```
+
+## 3. Фактичні інтервали за понеділковий ранковий пік
 
 ```{r}
 #| label: actual-headways
-# TODO:
-# 1) відфільтрувати rt по обраному route_id
-# 2) відстань до кінцевої: sf::st_distance() або наближено за формулою
-#    haversine; залишити точки < 150 м
-# 3) для кожного vehicle_id узяти перший момент появи в радіусі -> "прибуття"
-# 4) відсортувати прибуття, diff() -> фактичні headway
+win <- rt |> filter(dt >= ymd_hm("2026-07-13 06:45", tz = "Europe/Kyiv"))
+
+results <- list()
+for (i in seq_len(nrow(terminals))) {
+  t <- terminals[i, ]
+  arr <- arrivals_at(win |> filter(route_id == t$route_id),
+                     t$stop_lat, t$stop_lon)
+  hw <- diff(as.numeric(arr) / 60)          # хвилини між прибуттями
+  hw <- hw[hw > 2 & hw < 90]                # дублі полінгу та розриви — геть
+  results[[i]] <- tibble(
+    route_id = t$route_id, direction_id = t$direction_id,
+    n_arrivals = length(arr),
+    fact_mean = mean(hw), fact_median = median(hw),
+    headways = list(hw)
+  )
+}
+actual <- bind_rows(results)
+
+comparison <- actual |>
+  left_join(plan, by = c("route_id", "direction_id")) |>
+  select(route_id, direction_id, n_arrivals,
+         fact_mean, fact_median, plan_headway)
+comparison |> knitr::kable(digits = 1,
+  caption = "Факт vs план: інтервали ранкового піку, понеділок 13.07.2026")
 ```
 
-## Порівняння з плановими
+Контроль коректності: незалежний перерахунок цього ж пайплайна іншим
+інструментом (Python) дав: трамвай 1 — факт ~7.3–7.5 хв; тролейбус 16 —
+~15.0–16.9 хв; автобус 49 — лише 2–3 інтервали. Розбіжність понад ±0.5 хв —
+сигнал шукати помилку.
 
-::: {.callout-important}
-Збір ішов у **вихідні** — порівнюємо з розкладом вихідного дня
-(service_id, де saturday = 1 / sunday = 1), а не буднього!
-:::
+## 4. Формальний тест (Wilcoxon signed-rank, лекція 10)
+
+Чи відрізняються фактичні інтервали трамвая 1 від планового значення?
+Односторонній тест: факт *більший* за план.
 
 ```{r}
-#| label: compare
-# TODO:
-# 1) планові headway цих маршрутів на вихідний service_id (код із 01_data_preparation.qmd)
-# 2) діагностика нормальності -> t.test() або wilcox.test(): факт vs план
-# 3) один графік: розподіл фактичних headway + вертикальна лінія планового середнього
+#| label: wilcoxon
+hw_tram1 <- actual |>
+  filter(route_id == "1_1") |>
+  pull(headways) |> unlist()
+
+plan_tram1 <- plan |>
+  filter(route_id == "1_1") |>
+  summarise(m = mean(plan_headway)) |> pull(m)
+
+wilcox.test(hw_tram1, mu = plan_tram1, alternative = "greater")
 ```
 
-## Висновок для звіту
+## 5. Результати пілота
 
-Чесно: це пілот на **одному вихідному дні**, GPS має шум, покриття фіду
-неповне. 2–3 речення в Discussion.
+Зафіксовані значення (понеділок 13.07.2026, ранковий пік):
+
+- Трамвай 1: факт 7.3–7.6 хв vs план 4.8–5.8 хв (25–28 прибуттів на
+  напрямок); Wilcoxon signed-rank проти планового значення 5.29 хв:
+  V = 531, p = 0.0035 (однобічний, «факт більший»).
+- Тролейбус 16 (кінцева «вул. Мрії»): факт 16.9 / медіана 15.8 хв vs план
+  16.0 хв (9 прибуттів). Кінцева «Майдан Незалежності»: 4 прибуття,
+  медіана 12.9 vs план 13.6 (середнє 30.2 роздуте одним розривом — для
+  малих n орієнтир медіана).
+- Автобус 49: по 2 прибуття на напрямок — недостатньо для висновку.
+
+Обмеження: один ранок; крок полінгу 2 хв (±2 хв на подію); радіусна
+детекція прибуттів (гістерезис 200/450 м); ties у Wilcoxon через
+квантування часу → нормальна апроксимація.
+
+[Опційно, 2 речення інтерпретації — АРСЕН: що це каже про довіру до
+плану? Каркас: «Пілот показує, що план ___: тролейбус 16 ___, тоді як
+трамвай 1 у пік ___. Втім, один ранок спостережень ___.»]
