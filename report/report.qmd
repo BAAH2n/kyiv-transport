@@ -19,6 +19,12 @@ format:
   pdf:
     toc: true
     number-sections: true
+    # xelatex + шрифти з кирилицею: інакше українські підписи зникають
+    # у код-чанках і таблицях (стандартний шрифт pdflatex без кирилиці).
+    # macOS: Arial + Menlo. Windows: заміни monofont на "Consolas".
+    pdf-engine: xelatex
+    mainfont: "Arial"
+    monofont: "Menlo"
   html:
     toc: true
     embed-resources: true
@@ -35,8 +41,9 @@ execute:
      ПЕРЕД ЗДАЧЕЮ: кожен автор перечитує свою секцію! -->
 
 **Dataset:** Портал даних Києва, КП «Київпастранс». 1230 route × direction ×
-time-slot rows constructed; **1036 analyzed** after excluding slots with
-fewer than 5 departures. 9 variables.
+time-slot rows constructed; interval-level analyses (EDA, H1–H2) use the
+**1036 rows** with ≥5 departures, categorical/distributional tests (H3, H5)
+use the full table. 9 variables.
 
 # Introduction
 
@@ -63,9 +70,11 @@ The data used in this analysis were obtained from the Kyiv Open Data Portal.
 The dataset contains plan schedules collected directly from GTFS Static
 tables, containing routes, trips, and stop times, spanning a typical active
 weekday schedule. Each observation represents a unique route and direction
-combined with a specific operational time slot. Route–slot combinations with
-fewer than 5 scheduled departures were excluded from the analysis to reduce
-noise in interval estimates (1230 → 1036 observations).
+combined with a specific operational time slot. For the interval-level
+analyses (EDA, H1–H2), route–slot combinations with fewer than 5 scheduled
+departures were excluded to reduce noise in interval estimates (1230 → 1036
+observations); the categorical and distributional tests (H3, H5) use the
+full table.
 
 ## Codebook
 
@@ -127,8 +136,12 @@ constitute a Poisson process).
 1. **Rows dropped:** we dropped all the weekend operations, because they
    would skew our data. Filtered only for the transport that is in use to
    not overestimate the vehicle number. Kept only the stops located in Kyiv,
-   because this is the main area of our research. Excluded route–slot
-   combinations with fewer than 5 departures (1230 → 1036 rows).
+   because this is the main area of our research. For the interval-level
+   analyses (EDA, H1, H2) we additionally excluded route–slot combinations
+   with fewer than 5 departures (1230 → 1036 rows), since a mean headway
+   based on 2–3 departures is unstable; the categorical and distributional
+   tests (H3, H5) use the full 1230-row table to retain all scheduled
+   slots — their conclusions are unchanged under the filter.
 2. **Missing values:** we handled the missing values by omission to avoid
    the imputation bias. Used `na.rm = TRUE` to skip the missing values
    during aggregation. Because we used `lag()` to calculate the headways,
@@ -302,9 +315,10 @@ write_csv(capacity_by_district,
 ```{r}
 #| label: setup
 #| echo: false
-library(tidyverse); library(here)
-d <- read_csv(here("data", "processed", "analysis_table.csv")) |>
-  filter(n_departures >= 5)
+library(tidyverse); library(here); library(lubridate)
+d_full <- read_csv(here("data", "processed", "analysis_table.csv"))
+# інтервальні аналізи (EDA, H1-H2): слоти з >= 5 відправленнями
+d <- d_full |> filter(n_departures >= 5)
 ```
 
 ```{r}
@@ -490,7 +504,9 @@ min, rare: >20 min, during rush) does not depend on the transport type
 
 ```{r}
 #| label: h3
-peak_data <- d |> filter(peak) |>
+# H3 та H5 пораховані на повній таблиці (без фільтра >= 5 відправлень),
+# щоб зберегти всі запланові слоти; висновки за фільтром не змінюються
+peak_data <- d_full |> filter(peak) |>
   mutate(freq_cat = cut(sched_headway_min, breaks = c(0, 10, 20, Inf),
                         labels = c("частий", "середній", "рідкісний")))
 tab3 <- table(peak_data$transport_type, peak_data$freq_cat)
@@ -509,13 +525,13 @@ across categories is very significant and differs greatly from
 proportionally equal values; for if Kyiv had planned the intervals for
 buses, trams, and trolleybuses to be strictly the same, the value would have
 been close to 0. The expected frequency for trams in the "frequent"
-category turned out to be less than the threshold (4.31 < 5). Therefore, the
+category turned out to be less than the threshold (4.01 < 5). Therefore, the
 standard approximation to the chi-square distribution could give us a
 misleading value. For this reason, we used a p-value simulation: the
 computer independently generates a distribution from 10000 random
 combinations of the available data, and the degrees of freedom in this case
-are meaningless — therefore, the results show NA. The simulated p-value
-(~1e-04) is very small and shows us that the chance of such a transportation
+are meaningless — therefore, the results show NA. The simulated p-value of
+0.000099 is very small and shows us that the chance of such a transportation
 distribution occurring by chance is very low.
 
 An analysis of this data confirmed that trams have the highest scheduled
@@ -611,8 +627,9 @@ constitute a Poisson process).**
 
 ```{r}
 #| label: h5
+# як і H3 — на повній таблиці (див. примітку в Data Preparation)
 for (type in c("автобус", "трамвай", "тролейбус")) {
-  intervals <- d |>
+  intervals <- d_full |>
     filter(transport_type == type, peak == TRUE) |>
     pull(sched_headway_min) |> na.omit()
   lambda_est <- 1 / mean(intervals)
@@ -625,11 +642,11 @@ for (type in c("автобус", "трамвай", "тролейбус")) {
 
 **The $H_0$ (exponentially distributed intervals, i.e. fully random
 arrivals) was rejected for all three modes.** The D-statistic ranges from
-0.279 for trams to 0.357 for buses (trolleybuses: 0.339). This value
+0.2337 for trams to 0.3266 for trolleybuses (buses: 0.3157). This value
 indicates the discrepancy between the scheduled intervals and the ideal
 random curve: if the vehicles arrived at stops in a completely random and
 independent manner, the values would be close to 0. The p-value for all
-modes is far below 0.05 (the largest is 1.55e-04 for trams). This shows that
+modes is far below 0.05 (the largest is 0.001068 for trams). This shows that
 the probability that such a distribution of intervals occurred by chance is
 practically zero: the schedules are genuinely planned rather than random.
 Buses and trolleybuses show the greatest deviation from randomness,
